@@ -13,6 +13,7 @@ using System.IO;
 using UnityEngine;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine.Networking;
 using Debug = UnityEngine.Debug;
 using Object = UnityEngine.Object;
@@ -30,107 +31,79 @@ namespace JFramework
         public static event Action<string> OnLoadUpdate;
         public static event Action OnLoadComplete;
 
-        public static async Task<T> Load<T>(string path) where T : Object
+        public static async Task<T> Load<T>(string assetPath) where T : Object
         {
             try
             {
                 if (GlobalManager.Instance)
                 {
-                    var asset = await LoadAsset<T>(path);
-                    if (asset == null)
-                    {
-                        Debug.LogWarning($"加载 {path} 资源为空！");
-                        return null;
-                    }
-
-                    return asset;
+                    var assetData = await LoadAsset<T>(assetPath);
+                    return assetData;
                 }
             }
             catch (Exception e)
             {
-                Debug.LogWarning(e);
+                Debug.LogWarning($"加载资源 {assetPath} 失败!\n" + e);
             }
 
             return null;
         }
 
-        public static async void Load<T>(string path, Action<T> action) where T : Object
+        public static async void Load<T>(string assetPath, Action<T> action) where T : Object
         {
             try
             {
                 if (GlobalManager.Instance)
                 {
-                    var asset = await LoadAsset<T>(path);
-                    if (asset == null)
-                    {
-                        Debug.LogWarning($"加载 {path} 资源为空！");
-                        return;
-                    }
-
-                    action?.Invoke(asset);
+                    var assetData = await LoadAsset<T>(assetPath);
+                    action?.Invoke(assetData);
                 }
             }
             catch (Exception e)
             {
-                Debug.LogWarning(e);
+                Debug.LogWarning($"加载资源 {assetPath} 失败!\n" + e);
             }
         }
 
-        private static async Task<T> LoadAsset<T>(string path) where T : Object
+        private static async Task<T> LoadAsset<T>(string assetPath) where T : Object
         {
             if (GlobalManager.mode == AssetMode.AssetBundle)
             {
-                var data = await LoadAssetData(path);
-                var bundle = await LoadAssetBundle(data.bundle);
-                var asset = AssetBundleLoader.LoadAsync<T>(bundle, data.asset);
-                asset ??= await ResourcesLoader.LoadAsync<T>(path);
-                return asset;
+                var assetInfo = await LoadDependency(assetPath);
+                var assetBundle = await LoadAssetBundle(assetInfo.bundle);
+                var assetData = AssetBundleLoader.LoadAsync<T>(assetBundle, assetInfo.asset);
+                assetData ??= await ResourcesLoader.LoadAsync<T>(assetPath);
+                return assetData;
             }
             else
             {
 #if UNITY_EDITOR
-                var asset = SimulateLoader.LoadAsync<T>(path);
-                asset ??= await ResourcesLoader.LoadAsync<T>(path);
+                var assetData = SimulateLoader.LoadAsync<T>(assetPath);
+                assetData ??= await ResourcesLoader.LoadAsync<T>(assetPath);
 #else
-                var asset = await ResourcesLoader.LoadAsync<T>(path);
+                var assetData = await ResourcesLoader.LoadAsync<T>(assetPath);
 #endif
-                return asset;
+                return assetData;
             }
         }
 
-        internal static async Task<string> LoadScene(string path)
+        internal static async Task<string> LoadScene(string assetPath)
         {
-            try
+            if (GlobalManager.mode == AssetMode.AssetBundle)
             {
-                if (!GlobalManager.Instance) return null;
-                if (GlobalManager.mode == AssetMode.AssetBundle)
+                var assetInfo = await LoadDependency(assetPath);
+                var assetBundle = await LoadAssetBundle(assetInfo.bundle);
+                if (assetBundle.GetAllScenePaths().Any(sceneData => sceneData == assetInfo.asset))
                 {
-                    var data = await LoadAssetData(path);
-                    var bundle = await LoadAssetBundle(data.bundle);
-                    if (bundle.GetAllScenePaths().Length > 0)
-                    {
-                        return data.asset;
-                    }
+                    return assetInfo.asset;
                 }
-
-                return path.Split('/')[1];
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning(e);
             }
 
-            return null;
+            return assetPath.Substring(assetPath.LastIndexOf('/') + 1);
         }
 
-        private static async Task<AssetData> LoadAssetData(string path)
+        private static async Task<AssetData> LoadDependency(string assetPath)
         {
-            if (!assets.TryGetValue(path, out var assetData))
-            {
-                assetData = new AssetData(path);
-                assets.Add(path, assetData);
-            }
-
             if (mainAsset == null)
             {
                 mainAsset = await LoadAssetBundle(GlobalSetting.Instance.platform.ToString());
@@ -138,10 +111,16 @@ namespace JFramework
                 OnLoadEntry?.Invoke(manifest.GetAllAssetBundles());
             }
 
+            if (!assets.TryGetValue(assetPath, out var assetData))
+            {
+                assetData = new AssetData(assetPath);
+                assets.Add(assetPath, assetData);
+            }
+
             var dependencies = manifest.GetAllDependencies(assetData.bundle);
             foreach (var dependency in dependencies)
             {
-                await LoadAssetBundle(dependency);
+                _ = LoadAssetBundle(dependency);
             }
 
             return assetData;
@@ -159,12 +138,13 @@ namespace JFramework
             var assetBundles = manifest.GetAllAssetBundles();
             foreach (var assetBundle in assetBundles)
             {
-                await LoadAssetBundle(assetBundle);
+                _ = LoadAssetBundle(assetBundle);
             }
 
+            await Task.WhenAll(requests.Values);
             OnLoadComplete?.Invoke();
         }
-
+        
         private static async Task<AssetBundle> LoadAssetBundle(string bundle)
         {
             if (string.IsNullOrEmpty(bundle))
@@ -196,46 +176,30 @@ namespace JFramework
 
         private static async Task<AssetBundle> LoadAssetRequest(string bundle)
         {
-            var path = GlobalSetting.GetPersistentPath(bundle);
-            if (File.Exists(path))
+            var fileInfo = await BundleManager.GetRequest(bundle);
+            if (fileInfo.Key == 0)
             {
-                var bytes = await File.ReadAllBytesAsync(path);
-                return await LoadAssetRequest(bundle, bytes);
+                var bytes = await Task.Run(() => Obfuscator.Decrypt(File.ReadAllBytes(fileInfo.Value)));
+                var assetBundle = AssetBundle.LoadFromMemory(bytes);
+                Debug.Log("解密AB包：" + bundle);
+                bundles.Add(bundle, assetBundle);
+                OnLoadUpdate?.Invoke(bundle);
+                return assetBundle;
             }
 
-            path = GlobalSetting.GetStreamingPath(bundle);
-#if UNITY_ANDROID && !UNITY_EDITOR
-            using (var request = UnityWebRequest.Get(path))
+            if (fileInfo.Key == 1)
             {
+                using var request = UnityWebRequest.Get(fileInfo.Value);
                 await request.SendWebRequest();
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    return await LoadAssetRequest(bundle, request.downloadHandler.data);
-                }
-            }
-#else
-            if (File.Exists(path))
-            {
-                var bytes = await File.ReadAllBytesAsync(path);
-                return await LoadAssetRequest(bundle, bytes);
-            }
-
-#endif
-            return null;
-        }
-
-        private static async Task<AssetBundle> LoadAssetRequest(string bundle, byte[] bytes)
-        {
-            if (GlobalManager.Instance)
-            {
-                bytes = await Obfuscator.DecryptAsync(bytes);
-                if (GlobalManager.Instance)
-                {
+                    var bytes = request.downloadHandler.data;
+                    bytes = await Task.Run(() => Obfuscator.Decrypt(bytes));
+                    var assetBundle = AssetBundle.LoadFromMemory(bytes);
                     Debug.Log("解密AB包：" + bundle);
+                    bundles.Add(bundle, assetBundle);
                     OnLoadUpdate?.Invoke(bundle);
-                    var result = AssetBundle.LoadFromMemoryAsync(bytes);
-                    bundles.Add(bundle, result.assetBundle);
-                    return result.assetBundle;
+                    return assetBundle;
                 }
             }
 
