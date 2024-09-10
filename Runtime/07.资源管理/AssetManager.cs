@@ -102,6 +102,49 @@ namespace JFramework
             return assetPath.Substring(assetPath.LastIndexOf('/') + 1);
         }
 
+        private static async Task<AssetData> LoadDependency(string assetPath)
+        {
+            if (mainAsset == null)
+            {
+                mainAsset = await LoadAssetBundle(GlobalSetting.Instance.platform.ToString());
+                manifest = mainAsset.LoadAsset<AssetBundleManifest>(nameof(AssetBundleManifest));
+                OnLoadEntry?.Invoke(manifest.GetAllAssetBundles());
+            }
+
+            if (!assets.TryGetValue(assetPath, out var assetData))
+            {
+                assetData = new AssetData(assetPath);
+                assets.Add(assetPath, assetData);
+            }
+
+            var dependencies = manifest.GetAllDependencies(assetData.bundle);
+            foreach (var dependency in dependencies)
+            {
+                _ = LoadAssetBundle(dependency);
+            }
+
+            return assetData;
+        }
+
+        public static async void LoadAssetBundles()
+        {
+            if (mainAsset == null)
+            {
+                mainAsset = await LoadAssetBundle(GlobalSetting.Instance.platform.ToString());
+                manifest = mainAsset.LoadAsset<AssetBundleManifest>(nameof(AssetBundleManifest));
+                OnLoadEntry?.Invoke(manifest.GetAllAssetBundles());
+            }
+
+            var assetBundles = manifest.GetAllAssetBundles();
+            foreach (var assetBundle in assetBundles)
+            {
+                _ = LoadAssetBundle(assetBundle);
+            }
+
+            await Task.WhenAll(requests.Values);
+            OnLoadComplete?.Invoke();
+        }
+        
         private static async Task<AssetBundle> LoadAssetBundle(string bundle)
         {
             if (string.IsNullOrEmpty(bundle))
@@ -129,49 +172,6 @@ namespace JFramework
             {
                 requests.Remove(bundle);
             }
-        }
-
-        private static async Task<AssetData> LoadDependency(string assetPath)
-        {
-            if (mainAsset == null)
-            {
-                mainAsset = await LoadAssetBundle(GlobalSetting.Instance.platform.ToString());
-                manifest = mainAsset.LoadAsset<AssetBundleManifest>(nameof(AssetBundleManifest));
-                OnLoadEntry?.Invoke(manifest.GetAllAssetBundles());
-            }
-
-            if (!assets.TryGetValue(assetPath, out var assetData))
-            {
-                assetData = new AssetData(assetPath);
-                assets.Add(assetPath, assetData);
-            }
-
-            var dependencies = manifest.GetAllDependencies(assetData.bundle);
-            foreach (var dependency in dependencies)
-            {
-                _ = LoadAssetBundle(dependency);
-            }
-
-            return assetData;
-        }
-
-        public static async Task LoadAssetBundles()
-        {
-            if (mainAsset == null)
-            {
-                mainAsset = await LoadAssetBundle(GlobalSetting.Instance.platform.ToString());
-                manifest = mainAsset.LoadAsset<AssetBundleManifest>(nameof(AssetBundleManifest));
-                OnLoadEntry?.Invoke(manifest.GetAllAssetBundles());
-            }
-
-            var assetBundles = manifest.GetAllAssetBundles();
-            foreach (var assetBundle in assetBundles)
-            {
-                _ = LoadAssetBundle(assetBundle);
-            }
-
-            await Task.WhenAll(requests.Values);
-            OnLoadComplete?.Invoke();
         }
 
         private static async Task<AssetBundle> LoadAssetRequest(string bundle)
